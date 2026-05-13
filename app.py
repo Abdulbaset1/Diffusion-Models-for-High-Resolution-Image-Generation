@@ -4,485 +4,423 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-import requests
-import os
+import math
 import io
+import os
+import requests
+import zipfile
+import warnings
 
-# ─────────────────────────────────────────
-# PAGE CONFIG
-# ─────────────────────────────────────────
-st.set_page_config(
-    page_title="DDPM Face Generator",
-    page_icon="🎨",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
-# ─────────────────────────────────────────
-# CUSTOM CSS
-# ─────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;600;700&display=swap');
-
-:root {
-    --bg: #0a0a0f;
-    --surface: #12121a;
-    --surface2: #1a1a26;
-    --accent: #7c6aff;
-    --accent2: #ff6a9d;
-    --accent3: #6affda;
-    --text: #e8e8f0;
-    --text-muted: #6b6b8a;
-    --border: #2a2a3d;
-}
-html, body, [class*="css"] {
-    font-family: 'Sora', sans-serif;
-    background-color: var(--bg);
-    color: var(--text);
-}
-.stApp {
-    background: var(--bg);
-    background-image:
-        radial-gradient(ellipse at 20% 20%, rgba(124,106,255,0.08) 0%, transparent 50%),
-        radial-gradient(ellipse at 80% 80%, rgba(255,106,157,0.06) 0%, transparent 50%);
-}
-.hero {
-    text-align: center;
-    padding: 2.5rem 1rem 1.5rem;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 2rem;
-}
-.hero h1 {
-    font-family: 'Space Mono', monospace;
-    font-size: 2.4rem;
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--accent), var(--accent2), var(--accent3));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin: 0;
-    letter-spacing: -1px;
-}
-.hero p {
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    margin-top: 0.5rem;
-    font-weight: 300;
-}
-.card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 1.5rem;
-    margin-bottom: 1rem;
-}
-.step-badge {
-    display: inline-block;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    color: white;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.7rem;
-    font-weight: 700;
-    padding: 3px 10px;
-    border-radius: 20px;
-    margin-bottom: 0.5rem;
-    letter-spacing: 1px;
-}
-.metric-row {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1rem;
-}
-.metric-box {
-    flex: 1;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1rem;
-    text-align: center;
-}
-.metric-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.65rem;
-    color: var(--text-muted);
-    letter-spacing: 2px;
-    text-transform: uppercase;
-}
-.metric-value {
-    font-family: 'Space Mono', monospace;
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--accent3);
-    margin-top: 4px;
-}
-.steps-label {
-    font-family: 'Space Mono', monospace;
-    font-size: 0.65rem;
-    color: var(--text-muted);
-    text-align: center;
-    margin-top: 4px;
-    letter-spacing: 1px;
-}
-section[data-testid="stSidebar"] {
-    background: var(--surface) !important;
-    border-right: 1px solid var(--border);
-}
-.stButton > button {
-    width: 100%;
-    background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 12px !important;
-    font-family: 'Space Mono', monospace !important;
-    font-size: 0.85rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 1px !important;
-    padding: 0.75rem !important;
-}
-.status-box {
-    background: var(--surface2);
-    border-left: 3px solid var(--accent3);
-    border-radius: 0 8px 8px 0;
-    padding: 0.75rem 1rem;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.8rem;
-    color: var(--accent3);
-    margin: 1rem 0;
-}
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────
-# MODEL ARCHITECTURE
-# ─────────────────────────────────────────
-class TimeEmbedding(nn.Module):
+# Model Definitions
+class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * 4), nn.GELU(), nn.Linear(dim * 4, dim)
-        )
-    def forward(self, t):
+    
+    def forward(self, time):
+        device = time.device
         half_dim = self.dim // 2
-        embeddings = torch.log(torch.tensor(10000.0)) / (half_dim - 1)
-        embeddings = torch.exp(torch.arange(half_dim, device=t.device) * -embeddings)
-        embeddings = t[:, None] * embeddings[None, :]
-        embeddings = torch.cat([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
-        return self.mlp(embeddings)
-
+        embeddings = math.log(10000) / (half_dim - 1)
+        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_emb_dim, dropout=0.1):
+    def __init__(self, in_channels, out_channels, time_emb_dim):
         super().__init__()
-        num_groups = 8
-        while out_channels % num_groups != 0:
-            num_groups //= 2
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups, out_channels), nn.GELU()
-        )
-        self.time_mlp = nn.Sequential(nn.GELU(), nn.Linear(time_emb_dim, out_channels))
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups, out_channels), nn.GELU(), nn.Dropout(dropout)
-        )
-        self.residual_conv = (
-            nn.Conv2d(in_channels, out_channels, kernel_size=1)
-            if in_channels != out_channels else nn.Identity()
-        )
-    def forward(self, x, time_emb):
-        residual = self.residual_conv(x)
-        h = self.conv1(x) + self.time_mlp(time_emb)[:, :, None, None]
-        return self.conv2(h) + residual
-
-
-class Downsample(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=1)
-    def forward(self, x): return self.conv(x)
-
-
-class Upsample(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        )
-    def forward(self, x): return self.conv(x)
-
+        self.norm1 = nn.GroupNorm(32, in_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.norm2 = nn.GroupNorm(32, out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(time_emb_dim, out_channels))
+        self.residual_conv = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+    
+    def forward(self, x, t_emb):
+        h = self.norm1(x)
+        h = F.silu(h)
+        h = self.conv1(h)
+        h = h + self.time_mlp(t_emb)[:, :, None, None]
+        h = self.norm2(h)
+        h = F.silu(h)
+        h = self.conv2(h)
+        return h + self.residual_conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, base_channels=64,
-                 time_emb_dim=128, channel_mults=(1, 2, 4)):
+    def __init__(self, in_channels=3, out_channels=3, time_emb_dim=256):
         super().__init__()
-        self.time_embedding = TimeEmbedding(time_emb_dim)
-        self.init_conv = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
-        channels = [base_channels * m for m in channel_mults]
-
-        self.encoder_blocks    = nn.ModuleList()
-        self.downsample_blocks = nn.ModuleList()
-        prev = base_channels
-        for ch in channels:
-            self.encoder_blocks.append(nn.ModuleList([
-                ResidualBlock(prev, ch, time_emb_dim),
-                ResidualBlock(ch, ch, time_emb_dim)
-            ]))
-            self.downsample_blocks.append(Downsample(ch) if ch != channels[-1] else nn.Identity())
-            prev = ch
-
-        self.bottleneck = nn.ModuleList([
-            ResidualBlock(channels[-1], channels[-1], time_emb_dim),
-            ResidualBlock(channels[-1], channels[-1], time_emb_dim)
-        ])
-
-        self.upsample_blocks = nn.ModuleList()
-        self.decoder_blocks  = nn.ModuleList()
-        for i, ch in enumerate(reversed(channels)):
-            self.upsample_blocks.append(Upsample(prev) if i != 0 else nn.Identity())
-            self.decoder_blocks.append(nn.ModuleList([
-                ResidualBlock(prev + ch, ch, time_emb_dim),
-                ResidualBlock(ch, ch, time_emb_dim)
-            ]))
-            prev = ch
-
-        ng = 8
-        while base_channels % ng != 0: ng //= 2
-        self.final_conv = nn.Sequential(
-            nn.GroupNorm(ng, base_channels), nn.GELU(),
-            nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
+        
+        self.time_mlp = nn.Sequential(
+            SinusoidalPositionEmbeddings(time_emb_dim),
+            nn.Linear(time_emb_dim, time_emb_dim),
+            nn.SiLU()
         )
-
+        
+        self.conv1 = nn.Conv2d(in_channels, 64, 3, padding=1)
+        self.down1 = ResidualBlock(64, 64, time_emb_dim)
+        self.down1_2 = ResidualBlock(64, 64, time_emb_dim)
+        
+        self.downsample1 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.down2 = ResidualBlock(128, 128, time_emb_dim)
+        self.down2_2 = ResidualBlock(128, 128, time_emb_dim)
+        
+        self.downsample2 = nn.Conv2d(128, 256, 4, 2, 1)
+        self.down3 = ResidualBlock(256, 256, time_emb_dim)
+        self.down3_2 = ResidualBlock(256, 256, time_emb_dim)
+        
+        self.bottleneck1 = ResidualBlock(256, 256, time_emb_dim)
+        self.bottleneck2 = ResidualBlock(256, 256, time_emb_dim)
+        
+        self.upsample1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
+        self.up1 = ResidualBlock(128, 128, time_emb_dim)
+        self.up1_2 = ResidualBlock(128, 128, time_emb_dim)
+        
+        self.upsample2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
+        self.up2 = ResidualBlock(64, 64, time_emb_dim)
+        self.up2_2 = ResidualBlock(64, 64, time_emb_dim)
+        
+        self.up3 = ResidualBlock(64, 64, time_emb_dim)
+        self.up3_2 = ResidualBlock(64, 64, time_emb_dim)
+        
+        self.output = nn.Conv2d(64, out_channels, 1)
+    
     def forward(self, x, t):
-        te = self.time_embedding(t)
-        x  = self.init_conv(x)
-        skips = []
-        for blocks, down in zip(self.encoder_blocks, self.downsample_blocks):
-            for b in blocks: x = b(x, te)
-            skips.append(x); x = down(x)
-        for b in self.bottleneck: x = b(x, te)
-        for up, blocks, skip in zip(self.upsample_blocks, self.decoder_blocks, reversed(skips)):
-            x = up(x); x = torch.cat([x, skip], dim=1)
-            for b in blocks: x = b(x, te)
-        return self.final_conv(x)
+        t_emb = self.time_mlp(t)
+        
+        x1 = self.conv1(x)
+        d1 = self.down1(x1, t_emb)
+        d1 = self.down1_2(d1, t_emb)
+        
+        d2 = self.downsample1(d1)
+        d2 = self.down2(d2, t_emb)
+        d2 = self.down2_2(d2, t_emb)
+        
+        d3 = self.downsample2(d2)
+        d3 = self.down3(d3, t_emb)
+        d3 = self.down3_2(d3, t_emb)
+        
+        b = self.bottleneck1(d3, t_emb)
+        b = self.bottleneck2(b, t_emb)
+        
+        u1 = self.upsample1(b)
+        u1 = u1 + d2
+        u1 = self.up1(u1, t_emb)
+        u1 = self.up1_2(u1, t_emb)
+        
+        u2 = self.upsample2(u1)
+        u2 = u2 + d1
+        u2 = self.up2(u2, t_emb)
+        u2 = self.up2_2(u2, t_emb)
+        
+        u3 = u2 + x1
+        u3 = self.up3(u3, t_emb)
+        u3 = self.up3_2(u3, t_emb)
+        
+        return self.output(u3)
 
+class DiffusionModel:
+    def __init__(self, timesteps=300, beta_start=1e-4, beta_end=0.02, device='cuda'):
+        self.timesteps = timesteps
+        self.device = device
+        
+        self.betas = torch.linspace(beta_start, beta_end, timesteps).to(device)
+        self.alphas = 1 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - self.alphas_cumprod)
+    
+    @torch.no_grad()
+    def sample(self, model, image_size, batch_size=1):
+        model.eval()
+        x = torch.randn((batch_size, 3, image_size, image_size)).to(self.device)
+        
+        for t in reversed(range(self.timesteps)):
+            t_batch = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
+            predicted_noise = model(x, t_batch)
+            
+            alpha = self.alphas[t]
+            alpha_cumprod = self.alphas_cumprod[t]
+            beta = self.betas[t]
+            
+            noise = torch.randn_like(x) if t > 0 else torch.zeros_like(x)
+            
+            x = 1 / torch.sqrt(alpha) * (x - ((1 - alpha) / torch.sqrt(1 - alpha_cumprod)) * predicted_noise)
+            x = x + torch.sqrt(beta) * noise
+        
+        return x
 
-# ─────────────────────────────────────────
-# NOISE SCHEDULE
-# ─────────────────────────────────────────
-TIMESTEPS  = 500
-IMAGE_SIZE = 128
-betas               = torch.linspace(0.0001, 0.02, TIMESTEPS)
-alphas              = 1.0 - betas
-alphas_cumprod      = torch.cumprod(alphas, dim=0)
-alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
+def denormalize(tensor):
+    img = tensor.cpu().detach().permute(1, 2, 0).numpy()
+    img = (img + 1) / 2
+    img = np.clip(img, 0, 1)
+    return img
 
+def tensor_to_pil(tensor):
+    img = denormalize(tensor)
+    img = (img * 255).astype(np.uint8)
+    return Image.fromarray(img)
 
-# ─────────────────────────────────────────
-# LOAD MODEL
-# ─────────────────────────────────────────
-MODEL_URL  = "https://github.com/Mustehsan-Nisar-Rao/DDPM/releases/download/v1/best_model.pt"
-MODEL_PATH = "best_model.pt"
-
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def load_model():
-    if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 100_000:
-        r = requests.get(MODEL_URL, headers={"Accept": "application/octet-stream"}, stream=True)
-        with open(MODEL_PATH, "wb") as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = UNet(in_channels=3, out_channels=3, base_channels=64,
-                  time_emb_dim=128, channel_mults=(1, 2, 4)).to(device)
-    state_dict = torch.load(MODEL_PATH, map_location=device)
-    model.load_state_dict(state_dict)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = UNet(in_channels=3, out_channels=3, time_emb_dim=256).to(device)
+    
+    model_path = 'diffusion_model_final.pth'
+    
+    # Download model if not exists
+    if not os.path.exists(model_path):
+        with st.spinner('Downloading model from GitHub...'):
+            url = "https://github.com/Abdulbaset1/Diffusion-Models-for-High-Resolution-Image-Generation/releases/download/v1/diffusion_model_final.pth"
+            
+            # Download with progress
+            response = requests.get(url, stream=True)
+            total_size = int(response.headers.get('content-length', 0))
+            
+            with open(model_path, 'wb') as f:
+                with st.progress(0) as pbar:
+                    downloaded = 0
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            pbar.progress(min(1.0, downloaded / total_size))
+    
+    # Load model with weights_only=False (trusted source)
+    try:
+        # First try with weights_only=False (required for PyTorch 2.6+)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        st.error("Please ensure the model file is not corrupted.")
+        raise e
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+        
+        # Remove 'module.' prefix if present (from DataParallel)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            name = k[7:] if k.startswith('module.') else k
+            new_state_dict[name] = v
+        
+        # Load state dict with strict=False to allow missing keys
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        if missing_keys:
+            st.warning(f"Missing keys: {missing_keys[:5]}...")  # Show first 5 missing keys
+        if unexpected_keys:
+            st.warning(f"Unexpected keys: {unexpected_keys[:5]}...")
+    else:
+        # Checkpoint is the model itself
+        model = checkpoint.to(device)
+    
     model.eval()
     return model, device
 
-
-# ─────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────
-def tensor_to_pil(t):
-    img = torch.clamp((t + 1) / 2, 0, 1)
-    arr = (img[0].permute(1, 2, 0).cpu().detach().numpy() * 255)
-    arr = np.clip(arr, 0, 255).astype(np.uint8)
-    return Image.fromarray(arr, mode='RGB')
-
-
-@torch.no_grad()
-def generate(model, device, num_steps_to_show=8, seed=None):
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    x = torch.randn(1, 3, IMAGE_SIZE, IMAGE_SIZE, device=device)
-    capture_at   = set(np.linspace(TIMESTEPS - 1, 0, num_steps_to_show, dtype=int))
-    snapshots    = []
-    progress_bar = st.progress(0, text="Starting denoising...")
-    status_text  = st.empty()
-
-    for idx, t_val in enumerate(range(TIMESTEPS - 1, -1, -1)):
-        t_b  = torch.full((1,), t_val, device=device, dtype=torch.long)
-        pred = model(x, t_b)
-
-        a     = alphas[t_val].to(device)
-        ahat  = alphas_cumprod[t_val].to(device)
-        ahatm = alphas_cumprod_prev[t_val].to(device)
-
-        x0    = torch.clamp((x - torch.sqrt(1 - ahat) * pred) / torch.sqrt(ahat), -1, 1)
-        noise = torch.randn_like(x) if t_val > 0 else torch.zeros_like(x)
-        mean  = (torch.sqrt(ahatm) * (1 - a) / (1 - ahat)) * x0 \
-              + (torch.sqrt(a) * (1 - ahatm) / (1 - ahat)) * x
-        var   = (1 - ahatm) / (1 - ahat) * (1 - a)
-        x     = mean + torch.sqrt(var) * noise
-
-        if t_val in capture_at:
-            snapshots.append((t_val, tensor_to_pil(x)))
-
-        progress_bar.progress((idx + 1) / TIMESTEPS,
-                               text=f"Denoising... {TIMESTEPS - t_val}/{TIMESTEPS}")
-        if t_val % 100 == 0:
-            status_text.markdown(
-                f'<div class="status-box">⟳ Timestep {t_val} — removing noise</div>',
-                unsafe_allow_html=True
-            )
-
-    progress_bar.progress(1.0, text="Done!")
-    status_text.empty()
-    return tensor_to_pil(x), snapshots
-
-
-# ─────────────────────────────────────────
-# UI
-# ─────────────────────────────────────────
-st.markdown("""
-<div class="hero">
-    <h1>DDPM · FACE SYNTHESIS</h1>
-    <p>Denoising Diffusion Probabilistic Model · CelebA-HQ · 128×128</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Sidebar ──
-with st.sidebar:
-    st.markdown("### ⚙ Controls")
-    seed_mode = st.radio("Seed", ["Random", "Fixed"], horizontal=True)
-    seed_val  = None
-    if seed_mode == "Fixed":
-        seed_val = st.number_input("Seed value", min_value=0, max_value=99999, value=42)
-
-    st.markdown("---")
-    n_steps = st.slider("Steps to show", min_value=4, max_value=16, value=8, step=2)
-
-    st.markdown("---")
-    st.markdown("### ℹ Model Info")
-    st.markdown("""
-    <div style='font-size:0.78rem; color:#6b6b8a; line-height:1.8'>
-    <b style='color:#e8e8f0'>Architecture</b> — UNet DDPM<br>
-    <b style='color:#e8e8f0'>Dataset</b> — CelebA-HQ<br>
-    <b style='color:#e8e8f0'>Resolution</b> — 128 × 128<br>
-    <b style='color:#e8e8f0'>Timesteps</b> — 500<br>
-    <b style='color:#e8e8f0'>Epochs</b> — 50<br>
-    <b style='color:#e8e8f0'>Best Loss</b> — 0.01636
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    generate_btn = st.button("🎲  GENERATE")
-
-# ── Main layout ──
-col_main, col_final = st.columns([2, 1])
-with col_main:
-    st.markdown('<div class="step-badge">DENOISING PROCESS</div>', unsafe_allow_html=True)
-    steps_placeholder = st.empty()
-with col_final:
-    st.markdown('<div class="step-badge">FINAL OUTPUT</div>', unsafe_allow_html=True)
-    final_placeholder    = st.empty()
-    download_placeholder = st.empty()
-
-# ── Load model ──
-with st.spinner("Loading model weights..."):
-    model, device = load_model()
-
-st.markdown(
-    f'<div class="status-box">✓ Model ready · Running on {"GPU" if device.type=="cuda" else "CPU"}</div>',
-    unsafe_allow_html=True
+# Streamlit UI
+st.set_page_config(
+    page_title="Diffusion Model Image Generator", 
+    layout="wide",
+    page_icon="🎨"
 )
 
-# ── Generate ──
-if generate_btn:
-    final_img, snapshots = generate(model, device, num_steps_to_show=n_steps, seed=seed_val)
+st.title("🎨 Diffusion Model for High-Resolution Image Generation")
+st.markdown("*Generate high-quality face images using a trained diffusion model*")
 
-    with steps_placeholder.container():
-        cols_per_row = 4
-        for row_start in range(0, len(snapshots), cols_per_row):
-            row_snaps = snapshots[row_start:row_start + cols_per_row]
-            cols = st.columns(len(row_snaps))
-            for col, (t_val, img) in zip(cols, row_snaps):
-                with col:
-                    st.image(img)
-                    noise_pct = round(t_val / TIMESTEPS * 100)
-                    st.markdown(
-                        f'<div class="steps-label">T={t_val} · {noise_pct}% noise</div>',
-                        unsafe_allow_html=True
-                    )
+# Initialize session state
+if 'generated_images' not in st.session_state:
+    st.session_state.generated_images = []
+if 'generating' not in st.session_state:
+    st.session_state.generating = False
 
-    with final_placeholder.container():
-        st.image(final_img)
-        st.markdown('<div class="steps-label">GENERATED FACE</div>', unsafe_allow_html=True)
+# Sidebar
+with st.sidebar:
+    st.header("⚙️ Settings")
+    
+    num_images = st.slider("Number of Images", 1, 8, 4, 
+                           help="Number of images to generate at once")
+    image_size = st.selectbox("Image Size", [64, 128], index=1,
+                              help="Larger size = better quality but slower")
+    timesteps = st.slider("Diffusion Steps", 100, 300, 300, step=50,
+                          help="More steps = better quality but slower generation")
+    seed = st.number_input("Random Seed", value=42, step=1,
+                          help="Set for reproducible results")
+    
+    st.markdown("---")
+    
+    if st.button("🚀 Generate Images", type="primary", use_container_width=True):
+        st.session_state.generating = True
+        st.session_state.num_images = num_images
+        st.session_state.image_size = image_size
+        st.session_state.timesteps = timesteps
+        st.session_state.seed = seed
+        st.rerun()
+    
+    st.markdown("---")
+    st.markdown("### 📖 Instructions")
+    st.markdown("""
+    1. Adjust generation parameters
+    2. Click 'Generate Images'
+    3. Wait for model to load (first time only)
+    4. Download individual images or all as ZIP
+    """)
 
-    buf = io.BytesIO()
-    final_img.save(buf, format="PNG")
-    download_placeholder.download_button(
-        label="⬇ Download PNG",
-        data=buf.getvalue(),
-        file_name=f"ddpm_face_seed{seed_val or 'rand'}.png",
-        mime="image/png"
-    )
+# Main content area
+if st.session_state.generating:
+    # Create placeholder for progress
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    
+    try:
+        # Load model
+        with status_placeholder.container():
+            st.info("🔄 Loading model and generating images...")
+        
+        model, device = load_model()
+        
+        with status_placeholder.container():
+            st.success("✅ Model loaded successfully!")
+        
+        # Set seed
+        torch.manual_seed(st.session_state.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(st.session_state.seed)
+        
+        # Initialize diffusion
+        diffusion = DiffusionModel(
+            timesteps=st.session_state.timesteps, 
+            device=device
+        )
+        
+        # Generate images
+        progress_bar = progress_placeholder.progress(0)
+        status_text = status_placeholder.empty()
+        
+        generated_images = []
+        for i in range(st.session_state.num_images):
+            status_text.info(f"🖼️ Generating image {i+1}/{st.session_state.num_images}")
+            img_tensor = diffusion.sample(
+                model, 
+                st.session_state.image_size, 
+                batch_size=1
+            )
+            generated_images.append(tensor_to_pil(img_tensor[0]))
+            progress_bar.progress((i + 1) / st.session_state.num_images)
+        
+        # Clear progress indicators
+        progress_placeholder.empty()
+        status_placeholder.empty()
+        
+        # Store in session state
+        st.session_state.generated_images = generated_images
+        st.session_state.generating = False
+        
+        st.success(f"✅ Successfully generated {len(generated_images)} images!")
+        st.rerun()
+        
+    except Exception as e:
+        progress_placeholder.empty()
+        status_placeholder.empty()
+        st.error(f"❌ Error during generation: {str(e)}")
+        st.session_state.generating = False
+        st.stop()
 
-    st.markdown(f"""
-    <div class="metric-row">
-        <div class="metric-box">
-            <div class="metric-label">Timesteps</div>
-            <div class="metric-value">500</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-label">Best Loss</div>
-            <div class="metric-value">0.016</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-label">Resolution</div>
-            <div class="metric-value">128²</div>
-        </div>
-        <div class="metric-box">
-            <div class="metric-label">Device</div>
-            <div class="metric-value" style="font-size:1rem">{device.type.upper()}</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+# Display generated images
+if st.session_state.generated_images:
+    st.markdown("---")
+    st.subheader(f"✨ Generated Images")
+    
+    # Display in grid
+    num_images = len(st.session_state.generated_images)
+    cols_per_row = min(4, num_images)
+    cols = st.columns(cols_per_row)
+    
+    for idx, img in enumerate(st.session_state.generated_images):
+        with cols[idx % cols_per_row]:
+            st.image(img, caption=f"Image {idx+1}", use_container_width=True)
+            
+            # Download button for individual image
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            st.download_button(
+                label=f"📥 Download",
+                data=buf.getvalue(),
+                file_name=f"generated_image_{idx+1}.png",
+                mime="image/png",
+                key=f"download_{idx}"
+            )
+    
+    # Option to download all as zip
+    if num_images > 1:
+        st.markdown("---")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, 'w') as zip_file:
+                for idx, img in enumerate(st.session_state.generated_images):
+                    img_buf = io.BytesIO()
+                    img.save(img_buf, format="PNG")
+                    zip_file.writestr(f"image_{idx+1}.png", img_buf.getvalue())
+            
+            st.download_button(
+                label="📦 Download All Images (ZIP)",
+                data=zip_buf.getvalue(),
+                file_name="generated_images.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+    
+    # Clear button
+    st.markdown("---")
+    if st.button("🗑️ Clear All Images", use_container_width=True):
+        st.session_state.generated_images = []
+        st.rerun()
 
-else:
-    with steps_placeholder.container():
-        st.markdown("""
-        <div class="card" style="text-align:center; padding:3rem; border-style:dashed;">
-            <div style="font-size:3rem; margin-bottom:1rem;">🎲</div>
-            <div style="font-family:'Space Mono',monospace; font-size:0.8rem;
-                        color:#6b6b8a; letter-spacing:2px;">PRESS GENERATE TO START</div>
-            <div style="color:#3a3a55; font-size:0.75rem; margin-top:0.5rem;">
-                Intermediate denoising steps will appear here</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with final_placeholder.container():
-        st.markdown("""
-        <div class="card" style="text-align:center; padding:3rem;
-                                  border-style:dashed; min-height:200px;">
-            <div style="font-size:2rem;">✦</div>
-            <div style="font-family:'Space Mono',monospace; font-size:0.7rem;
-                        color:#3a3a55; letter-spacing:1px; margin-top:0.5rem;">AWAITING</div>
-        </div>
-        """, unsafe_allow_html=True)
+# Info section
+with st.expander("ℹ️ About & Technical Details"):
+    st.markdown("""
+    ### 🧠 How Diffusion Models Work
+    
+    Diffusion models generate images by:
+    1. Starting with pure random noise
+    2. Gradually denoising the image over many steps
+    3. Learning to reverse the noise addition process
+    
+    ### 🎯 Model Architecture
+    - **Type**: U-Net with residual blocks
+    - **Parameters**: ~20 million
+    - **Training Data**: FFHQ (Flickr-Faces-HQ) dataset
+    - **Input/Output**: 3-channel RGB images
+    
+    ### ⚡ Performance Tips
+    - **Faster generation**: Use 64px size and 100-200 steps
+    - **Better quality**: Use 128px size and 300 steps
+    - **First run**: Model download takes 1-2 minutes
+    - **Subsequent runs**: Model loads from cache (~10 seconds)
+    
+    ### 🔧 Technical Notes
+    - Built with PyTorch and Streamlit
+    - Uses CUDA acceleration when available
+    - Model downloaded from GitHub releases
+    - Supports reproducible results with random seeds
+    
+    ### 📚 References
+    - [Denoising Diffusion Probabilistic Models](https://arxiv.org/abs/2006.11239)
+    - [FFHQ Dataset](https://github.com/NVlabs/ffhq-dataset)
+    """)
+
+# Footer
+st.markdown("---")
+st.markdown(
+    "<div style='text-align: center;'>"
+    "Built with ❤️ using PyTorch & Streamlit | "
+    "<a href='https://github.com/Abdulbaset1/Diffusion-Models-for-High-Resolution-Image-Generation'>GitHub Repository</a>"
+    "</div>",
+    unsafe_allow_html=True
+)
