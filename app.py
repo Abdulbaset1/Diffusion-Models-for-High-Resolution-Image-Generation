@@ -296,6 +296,3 @@ else:
         </div>
         """, unsafe_allow_html=True)
 
-# Footer
-st.markdown("---")
-st.markdown("Built with PyTorch | DDPM Architecture | 128×128 Resolution")
