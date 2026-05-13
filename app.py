@@ -8,7 +8,8 @@ import math
 import io
 import os
 import requests
-from tqdm import tqdm
+import pickle
+import zipfile
 
 # Model Definitions
 class SinusoidalPositionEmbeddings(nn.Module):
@@ -166,19 +167,57 @@ def load_model():
     
     model_path = 'diffusion_model_final.pth'
     
+    # Download model if not exists
     if not os.path.exists(model_path):
         with st.spinner('Downloading model from GitHub...'):
             url = "https://github.com/Abdulbaset1/Diffusion-Models-for-High-Resolution-Image-Generation/releases/download/v1/diffusion_model_final.pth"
+            
+            # Download with progress
             response = requests.get(url, stream=True)
+            total_size = int(response.headers.get('content-length', 0))
+            
             with open(model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                with st.progress(0) as pbar:
+                    for i, chunk in enumerate(response.iter_content(chunk_size=8192)):
+                        f.write(chunk)
+                        if total_size > 0:
+                            pbar.progress(min(1.0, (i * 8192) / total_size))
     
-    checkpoint = torch.load(model_path, map_location=device)
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+    # Load model with error handling for different save formats
+    try:
+        # Try loading normally
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    except Exception as e:
+        st.warning(f"Standard loading failed, trying alternative methods...")
+        try:
+            # Try with pickle fix
+            import pickle
+            torch.serialization.add_safe_globals([UNet, ResidualBlock, SinusoidalPositionEmbeddings])
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        except:
+            # Try loading state dict only
+            checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict):
+        if 'model_state_dict' in checkpoint:
+            # Remove 'module.' prefix if present (from DataParallel)
+            state_dict = checkpoint['model_state_dict']
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                name = k[7:] if k.startswith('module.') else k
+                new_state_dict[name] = v
+            model.load_state_dict(new_state_dict)
+        else:
+            # Assume entire checkpoint is state dict
+            new_state_dict = {}
+            for k, v in checkpoint.items():
+                name = k[7:] if k.startswith('module.') else k
+                new_state_dict[name] = v
+            model.load_state_dict(new_state_dict)
     else:
-        model.load_state_dict(checkpoint)
+        # Checkpoint is the model itself
+        model = checkpoint.to(device)
     
     model.eval()
     return model, device
@@ -187,77 +226,150 @@ def load_model():
 st.set_page_config(page_title="Diffusion Model Image Generator", layout="wide")
 st.title("🎨 Diffusion Model for High-Resolution Image Generation")
 
+# Initialize session state
+if 'generated_images' not in st.session_state:
+    st.session_state.generated_images = []
+if 'generating' not in st.session_state:
+    st.session_state.generating = False
+
 # Sidebar
 with st.sidebar:
-    st.header("Settings")
+    st.header("⚙️ Settings")
     num_images = st.slider("Number of Images", 1, 8, 4)
     image_size = st.selectbox("Image Size", [64, 128], index=1)
-    timesteps = st.slider("Diffusion Steps", 100, 300, 300, step=50)
+    timesteps = st.slider("Diffusion Steps", 100, 300, 300, step=50, 
+                          help="More steps = better quality but slower")
     seed = st.number_input("Random Seed", value=42, step=1)
     
-    if st.button("🚀 Generate Images", type="primary", use_container_width=True):
-        st.session_state['generate'] = True
+    st.markdown("---")
+    
+    if st.button("🎨 Generate Images", type="primary", use_container_width=True):
+        st.session_state.generating = True
+        st.session_state.num_images = num_images
+        st.session_state.image_size = image_size
+        st.session_state.timesteps = timesteps
+        st.session_state.seed = seed
+        st.rerun()
 
-# Main content
-if 'generate' not in st.session_state:
-    st.session_state['generate'] = False
+# Generation logic
+if st.session_state.generating:
+    with st.spinner("Loading model and generating images..."):
+        try:
+            # Load model
+            model, device = load_model()
+            st.success("✓ Model loaded successfully!")
+            
+            # Set seed
+            torch.manual_seed(st.session_state.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(st.session_state.seed)
+            
+            # Initialize diffusion
+            diffusion = DiffusionModel(
+                timesteps=st.session_state.timesteps, 
+                device=device
+            )
+            
+            # Generate images
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            generated_images = []
+            for i in range(st.session_state.num_images):
+                status_text.text(f"🖼️ Generating image {i+1}/{st.session_state.num_images}")
+                img_tensor = diffusion.sample(
+                    model, 
+                    st.session_state.image_size, 
+                    batch_size=1
+                )
+                generated_images.append(tensor_to_pil(img_tensor[0]))
+                progress_bar.progress((i + 1) / st.session_state.num_images)
+            
+            progress_bar.empty()
+            status_text.empty()
+            st.success(f"✅ Successfully generated {len(generated_images)} images!")
+            
+            # Store in session state
+            st.session_state.generated_images = generated_images
+            st.session_state.generating = False
+            
+        except Exception as e:
+            st.error(f"Error during generation: {str(e)}")
+            st.session_state.generating = False
+            st.stop()
 
-if st.session_state['generate']:
-    # Load model
-    model, device = load_model()
+# Display generated images
+if st.session_state.generated_images:
+    st.subheader(f"✨ Generated Images ({len(st.session_state.generated_images)})")
     
-    # Set seed
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    
-    # Initialize diffusion
-    diffusion = DiffusionModel(timesteps=timesteps, device=device)
-    
-    # Generate images
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    images = []
-    for i in range(num_images):
-        status_text.text(f"Generating image {i+1}/{num_images}")
-        img_tensor = diffusion.sample(model, image_size, batch_size=1)
-        images.append(tensor_to_pil(img_tensor[0]))
-        progress_bar.progress((i + 1) / num_images)
-    
-    progress_bar.empty()
-    status_text.text("Generation complete!")
-    
-    # Display images
-    cols = st.columns(min(3, num_images))
-    for idx, img in enumerate(images):
+    # Display in grid
+    cols = st.columns(min(4, len(st.session_state.generated_images)))
+    for idx, img in enumerate(st.session_state.generated_images):
         with cols[idx % len(cols)]:
             st.image(img, caption=f"Image {idx+1}", use_container_width=True)
             
-            # Download button
+            # Download button for individual image
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             st.download_button(
-                label=f"Download {idx+1}",
+                label=f"📥 Download {idx+1}",
                 data=buf.getvalue(),
                 file_name=f"generated_image_{idx+1}.png",
                 mime="image/png",
                 key=f"download_{idx}"
             )
     
-    # Reset generation flag
-    st.session_state['generate'] = False
+    # Option to download all as zip
+    if len(st.session_state.generated_images) > 1:
+        st.markdown("---")
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, 'w') as zip_file:
+            for idx, img in enumerate(st.session_state.generated_images):
+                img_buf = io.BytesIO()
+                img.save(img_buf, format="PNG")
+                zip_file.writestr(f"image_{idx+1}.png", img_buf.getvalue())
+        
+        st.download_button(
+            label="📦 Download All Images (ZIP)",
+            data=zip_buf.getvalue(),
+            file_name="generated_images.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+    
+    # Clear button
+    if st.button("🗑️ Clear All Images", use_container_width=True):
+        st.session_state.generated_images = []
+        st.rerun()
 
 # Info section
-with st.expander("About"):
+with st.expander("ℹ️ About & Instructions"):
     st.markdown("""
-    This app uses a diffusion model trained on face images to generate new images from pure noise.
+    ### How it works
+    This app uses a **Diffusion Model** trained on face images to generate new images from random noise.
     
-    **Parameters:**
-    - **Number of Images**: How many images to generate
-    - **Image Size**: Resolution (64 or 128 pixels)
-    - **Diffusion Steps**: More steps = better quality but slower
-    - **Random Seed**: For reproducible results
+    ### Parameters
+    - **Number of Images**: How many images to generate at once
+    - **Image Size**: Resolution (64×64 or 128×128 pixels)
+    - **Diffusion Steps**: More steps = higher quality but slower generation
+    - **Random Seed**: Set for reproducible results
     
-    The model will be downloaded automatically on first run.
+    ### Tips
+    - The model is downloaded automatically on first use
+    - Generation takes 30-60 seconds depending on settings
+    - For best quality, use 128px size and 300 steps
+    - You can download individual images or all as a ZIP
+    
+    ### Model Details
+    - Architecture: U-Net with residual blocks
+    - Training data: FFHQ face dataset
+    - Parameters: ~20 million
     """)
+
+# Footer
+st.markdown("---")
+st.markdown(
+    "<center>Built with ❤️ using PyTorch & Streamlit | "
+    "<a href='https://github.com/Abdulbaset1/Diffusion-Models-for-High-Resolution-Image-Generation'>GitHub Repository</a></center>",
+    unsafe_allow_html=True
+)
